@@ -1,0 +1,11 @@
+Flask==3.0.3
+beautifulsoup4==4.12.3
+requests==2.32.3
+playwright==1.51.0
+openpyxl==3.1.5
+reportlab==4.2.2
+redis==5.2.1
+rq==2.1.0
+SQLAlchemy==2.0.40
+psycopg2-binary==2.9.10
+gunicorn==23.0.0

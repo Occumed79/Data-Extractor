@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Provider Data Portal</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <div class="page-shell">
+    <aside class="sidebar glass">
+      <div class="brand">Provider Data Portal</div>
+      <nav>
+        <a class="nav-link active" href="{{ url_for('index') }}">New Run</a>
+        <a class="nav-link" href="{{ url_for('history') }}">History</a>
+      </nav>
+      <div class="status-chip {{ 'ok' if playwright_available else 'warn' }}">
+        {{ 'Playwright ready' if playwright_available else 'Playwright not installed yet' }}
+      </div>
+      <div class="status-chip {{ 'ok' if queue_available else 'warn' }}">
+        {{ 'Redis + RQ connected' if queue_available else 'Redis + RQ not connected' }}
+      </div>
+    </aside>
+
+    <main class="content">
+      <section class="hero glass luminous">
+        <h1>Multi-site provider extraction</h1>
+        <p>Paste MDsave or Zocdoc URLs, queue a background crawl, then export CSV, JSON, Excel, or PDF reports.</p>
+      </section>
+
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          <div class="glass flash">{{ messages[0] }}</div>
+        {% endif %}
+      {% endwith %}
+
+      <section class="panel-grid">
+        <form class="glass panel luminous" method="post" action="{{ url_for('start_job') }}">
+          <div class="panel-title">Start a crawl</div>
+          <label>Paste one or more URLs</label>
+          <textarea name="urls" placeholder="One URL per line"></textarea>
+
+          <div class="row two-col">
+            <div>
+              <label>Site type</label>
+              <select name="site_type">
+                <option value="auto">Auto-detect</option>
+                <option value="mdsave">MDsave</option>
+                <option value="zocdoc">Zocdoc</option>
+              </select>
+            </div>
+            <div>
+              <label>Max pages per seed URL</label>
+              <input type="number" name="max_pages" value="25" min="1" max="150">
+            </div>
+          </div>
+
+          <label class="checkbox-row">
+            <input type="checkbox" name="detail_mode" checked>
+            <span>Open detail/profile pages for extra fields</span>
+          </label>
+
+          <button class="btn-primary" type="submit">Start background job</button>
+        </form>
+
+        <section class="glass panel">
+          <div class="panel-title">Recent jobs</div>
+          <div class="job-list compact">
+            {% for job in jobs %}
+              <a class="job-card" href="{{ url_for('job_detail', job_id=job['id']) }}">
+                <div class="job-top">
+                  <strong>{{ job['id'] }}</strong>
+                  <span class="pill {{ job['status'] }}">{{ job['status'] }}</span>
+                </div>
+                <div class="muted">{{ job['site_type'] }} · {{ job['result_count'] }} results</div>
+                <div class="tiny">{{ job['created_at'] }}</div>
+              </a>
+            {% else %}
+              <div class="empty-state">No jobs yet.</div>
+            {% endfor %}
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
