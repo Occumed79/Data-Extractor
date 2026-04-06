@@ -570,16 +570,19 @@ def start_job():
     job_id = uuid.uuid4().hex[:12]
     save_job(job_id, site_type, urls, detail_mode, max_pages)
 
-    if not QUEUE_AVAILABLE:
-        update_job(job_id, status='failed', error_text='Redis / RQ is not available yet. Start Redis and the worker, then try again.')
-        flash('Redis / RQ is not connected yet. Start Redis and run the worker first.')
-        return redirect(url_for('job_detail', job_id=job_id))
+from tasks import run_scrape_job
 
-    from tasks import run_scrape_job
+if QUEUE_AVAILABLE:
     queue = get_queue()
     queue.enqueue(run_scrape_job, job_id, job_timeout=60 * 60)
-    return redirect(url_for('job_detail', job_id=job_id))
+else:
+    try:
+        run_scrape_job(job_id)
+    except Exception as exc:
+        update_job(job_id, status='failed', error_text=str(exc)[:4000])
+        flash(f'Scrape failed: {str(exc)[:200]}')
 
+return redirect(url_for('job_detail', job_id=job_id))
 
 @app.route('/history', methods=['GET'])
 def history():
