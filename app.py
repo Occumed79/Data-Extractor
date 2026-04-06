@@ -570,19 +570,19 @@ def start_job():
     job_id = uuid.uuid4().hex[:12]
     save_job(job_id, site_type, urls, detail_mode, max_pages)
 
-from tasks import run_scrape_job
+    from tasks import run_scrape_job
 
-if QUEUE_AVAILABLE:
-    queue = get_queue()
-    queue.enqueue(run_scrape_job, job_id, job_timeout=60 * 60)
-else:
-    try:
-        run_scrape_job(job_id)
-    except Exception as exc:
-        update_job(job_id, status='failed', error_text=str(exc)[:4000])
-        flash(f'Scrape failed: {str(exc)[:200]}')
+    if QUEUE_AVAILABLE:
+        queue = get_queue()
+        queue.enqueue(run_scrape_job, job_id, job_timeout=60 * 60)
+    else:
+        try:
+            run_scrape_job(job_id)
+        except Exception as exc:
+            update_job(job_id, status='failed', error_text=str(exc)[:4000])
+            flash(f'Scrape failed: {str(exc)[:200]}')
 
-return redirect(url_for('job_detail', job_id=job_id))
+    return redirect(url_for('job_detail', job_id=job_id))
 
 @app.route('/history', methods=['GET'])
 def history():
