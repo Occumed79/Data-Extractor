@@ -22,7 +22,7 @@ if __name__ == '__main__':
             queue = get_queue()
             worker = Worker([queue], connection=conn)
             logger.info('Worker starting, listening on queue: %s', queue.name)
-            worker.work(with_scheduler=False)
+            worker.work()
             break
         except Exception as exc:
             logger.error('Worker startup error (attempt %d/5): %s', attempt, exc)
