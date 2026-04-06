@@ -705,6 +705,25 @@ def healthz():
     return jsonify({'status': 'ok'})
 
 
+@app.route('/api/queue-status', methods=['GET'])
+def queue_status():
+    try:
+        from rq import Queue as RQQueue, Worker as RQWorker
+        conn = get_queue().connection
+        q = RQQueue('provider-crawls', connection=conn)
+        workers = RQWorker.all(connection=conn)
+        failed_q = RQQueue('failed', connection=conn)
+        return jsonify({
+            'queue_available': QUEUE_AVAILABLE,
+            'queued_jobs': len(q),
+            'workers_active': len(workers),
+            'worker_names': [w.name for w in workers],
+            'failed_jobs': len(failed_q),
+        })
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
+
+
 if __name__ == '__main__':
     init_db()
     app.run(debug=False, host='0.0.0.0', port=int(os.getenv('PORT', '5000')))
