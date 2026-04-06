@@ -178,80 +178,81 @@ def find_next_links(base_url: str, soup: BeautifulSoup) -> list[str]:
     return links
 
 
+def _extract_next_data(html: str) -> dict:
+    """Pull the __NEXT_DATA__ JSON blob that Next.js embeds in every page."""
+    m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', html, re.S)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except Exception:
+            pass
+    return {}
+
+
+def _walk(obj, keys):
+    """Recursively search a nested dict/list for any of the given keys."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in keys:
+                yield v
+            yield from _walk(v, keys)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _walk(item, keys)
+
+
 def mdsave_parse_cards(base_url: str, html: str) -> tuple[list[ProviderRecord], list[str]]:
     soup = BeautifulSoup(html, 'html.parser')
     records: list[ProviderRecord] = []
-
-    candidates = []
-    for selector in ['article', 'section', 'div']:
-        for node in soup.select(selector):
-            text_blob = text_or_empty(node)
-            if not text_blob:
-                continue
-            if '$' in text_blob and ('learn more' in text_blob.lower() or 'provider' in text_blob.lower() or 'hospital' in text_blob.lower()):
-                candidates.append(node)
-
     seen = set()
-    for node in candidates:
-        text_blob = text_or_empty(node)
-        if len(text_blob) < 20:
+
+    # --- Try embedded JSON first (MDsave uses Next.js) ---
+    data = _extract_next_data(html)
+    providers = []
+    for val in _walk(data, {'providers', 'hospitals', 'results', 'items', 'data'}):
+        if isinstance(val, list):
+            providers.extend(val)
+    for p in providers:
+        if not isinstance(p, dict):
             continue
-        name = ''
-        profile_url = ''
-        link = node.find('a', href=True)
-        if link:
-            profile_url = urljoin(base_url, link['href'])
-            name = text_or_empty(link)
+        name = p.get('name') or p.get('hospitalName') or p.get('providerName') or ''
         if not name:
-            for heading in node.find_all(['h2', 'h3', 'h4', 'strong']):
-                maybe = text_or_empty(heading)
-                if maybe and maybe.lower() not in {'learn more', 'book now'}:
-                    name = maybe
-                    break
-        price_match = re.search(r'\$\s?[\d,]+(?:\.\d{2})?', text_blob)
-        price = price_match.group(0).replace(' ', '') if price_match else ''
-        address_match = re.search(r'\b\d{1,6}\s+[^\n,]+(?:,\s*[^\n,]+){1,3}', text_blob)
-        address = address_match.group(0) if address_match else ''
-        specialty = ''
-        procedure_name = ''
-        parts = [normalize_space(p) for p in text_blob.split('  ') if normalize_space(p)]
-        if len(parts) > 1:
-            specialty = parts[1] if parts[1] != name else ''
-        proc_match = re.search(r'(?:Procedure|Service)\s*:?\s*([^$\n]+)', text_blob, re.I)
-        if proc_match:
-            procedure_name = normalize_space(proc_match.group(1))
-        entity_type = 'hospital' if '/hospitals/' in base_url or 'hospital' in text_blob.lower() else 'provider'
+            continue
+        slug = p.get('slug') or p.get('url') or p.get('path') or ''
+        profile_url = urljoin('https://www.mdsave.com', slug) if slug else ''
+        price_raw = p.get('price') or p.get('lowestPrice') or p.get('cost') or ''
+        price = f'${price_raw}' if price_raw and not str(price_raw).startswith('$') else str(price_raw)
+        city = p.get('city') or ''
+        state = p.get('state') or ''
+        address = p.get('address') or p.get('streetAddress') or ''
+        specialty = p.get('specialty') or p.get('specialties') or ''
+        if isinstance(specialty, list):
+            specialty = ', '.join(str(s) for s in specialty)
+        entity_type = 'hospital' if 'hospital' in str(p.get('type', '')).lower() else 'provider'
         key = (name, address, price, profile_url)
-        if name and key not in seen:
+        if key not in seen:
             seen.add(key)
             records.append(ProviderRecord(
-                source_site='mdsave',
-                source_url=base_url,
-                listing_page_url=base_url,
-                name=name,
-                entity_type=entity_type,
-                specialty=specialty,
-                address=address,
-                price=price,
-                profile_url=profile_url,
-                procedure_name=procedure_name,
-                raw_json={'text': text_blob[:2500]}
+                source_site='mdsave', source_url=base_url, listing_page_url=base_url,
+                name=name, entity_type=entity_type, specialty=str(specialty),
+                address=address, city=city, state=state, price=price,
+                profile_url=profile_url, raw_json=p,
             ))
 
+    # --- Fallback: anchor links to /hospitals/ or /procedures/ ---
     if not records:
         for a in soup.find_all('a', href=True):
             href = urljoin(base_url, a['href'])
             text_val = text_or_empty(a)
-            if ('/hospitals/' in href or '/procedures/' in href) and text_val:
-                records.append(ProviderRecord(
-                    source_site='mdsave',
-                    source_url=base_url,
-                    listing_page_url=base_url,
-                    name=text_val,
-                    entity_type='directory_entry',
-                    profile_url=href,
-                    raw_json={'anchor_text': text_val}
-                ))
+            if ('/hospitals/' in href or '/procedures/' in href or '/providers/' in href) and text_val:
+                key = (text_val, '', '', href)
+                if key not in seen:
+                    seen.add(key)
+                    records.append(ProviderRecord(
+                        source_site='mdsave', source_url=base_url, listing_page_url=base_url,
+                        name=text_val, entity_type='directory_entry', profile_url=href,
+                        raw_json={'anchor_text': text_val},
+                    ))
 
     return records, find_next_links(base_url, soup)
 
@@ -261,74 +262,51 @@ def zocdoc_parse_cards(base_url: str, html: str) -> tuple[list[ProviderRecord], 
     records: list[ProviderRecord] = []
     seen = set()
 
-    card_nodes = soup.find_all(['article', 'div', 'section'])
-    for node in card_nodes:
-        text_blob = text_or_empty(node)
-        if not text_blob:
+    # --- Try embedded JSON (Zocdoc is a Next.js app) ---
+    data = _extract_next_data(html)
+    doctors = []
+    for val in _walk(data, {'doctors', 'providers', 'results', 'searchResults', 'items'}):
+        if isinstance(val, list):
+            doctors.extend(val)
+    for doc in doctors:
+        if not isinstance(doc, dict):
             continue
-        lower = text_blob.lower()
-        if not any(k in lower for k in ['review', 'book', 'available', 'insurance', 'specialist', 'dr.']):
-            continue
-        if len(text_blob) < 30:
-            continue
-
-        name = ''
-        profile_url = ''
-        for a in node.find_all('a', href=True):
-            href = urljoin(base_url, a['href'])
-            text_val = text_or_empty(a)
-            if '/doctor/' in href or '/practice/' in href or '/dentist/' in href:
-                profile_url = href
-                if text_val and len(text_val) < 120:
-                    name = text_val
-                    break
+        # Zocdoc nests doctor info under various keys
+        inner = doc.get('doctor') or doc.get('provider') or doc
+        name = inner.get('fullName') or inner.get('name') or inner.get('displayName') or ''
         if not name:
-            for h in node.find_all(['h2', 'h3', 'h4', 'strong']):
-                maybe = text_or_empty(h)
-                if maybe and len(maybe) < 120:
-                    name = maybe
-                    break
-        rating_match = re.search(r'(\d(?:\.\d)?)\s*(?:stars?|/5)', lower)
-        reviews_match = re.search(r'(\d[\d,]*)\s+reviews?', lower)
-        specialty = ''
-        address = ''
-        next_available = ''
-        insurance = ''
-        booking_url = ''
-        for a in node.find_all('a', href=True):
-            txt = text_or_empty(a).lower()
-            href = urljoin(base_url, a['href'])
-            if 'book' in txt or 'appointment' in txt:
-                booking_url = href
-                break
-        for line in [normalize_space(x) for x in text_blob.split('  ') if normalize_space(x)]:
-            if 'insurance' in line.lower() and not insurance:
-                insurance = line
-            if 'next available' in line.lower() and not next_available:
-                next_available = line
-            if re.search(r'\b[a-zA-Z\s]+,\s*[A-Z]{2}\b', line) and not address:
-                address = line
-        pieces = [p for p in re.split(r'\n|\|', text_blob) if normalize_space(p)]
-        if len(pieces) > 1 and not specialty:
-            specialty = normalize_space(pieces[1])
+            continue
+        profile_path = inner.get('profileLink') or inner.get('profileUrl') or inner.get('slug') or ''
+        profile_url = urljoin('https://www.zocdoc.com', profile_path) if profile_path else ''
+        specialty = inner.get('specialty') or inner.get('primarySpecialty') or ''
+        if isinstance(specialty, dict):
+            specialty = specialty.get('name', '')
+        rating = str(inner.get('rating') or inner.get('ratingScore') or '')
+        review_count = str(inner.get('reviewCount') or inner.get('numRatings') or '')
+        address_obj = inner.get('address') or inner.get('primaryLocation') or {}
+        if isinstance(address_obj, dict):
+            address = address_obj.get('address') or address_obj.get('street') or ''
+            city = address_obj.get('city') or ''
+            state = address_obj.get('state') or ''
+            zip_code = str(address_obj.get('zip') or address_obj.get('zipCode') or '')
+        else:
+            address = city = state = zip_code = ''
+        insurance_list = inner.get('insurances') or inner.get('acceptedInsurances') or []
+        insurance = ', '.join(
+            (i.get('name') or i if isinstance(i, (str, dict)) else '') for i in insurance_list[:3]
+            if i
+        )
+        next_avail = inner.get('nextAvailableDate') or inner.get('earliestAvailability') or ''
         key = (name, address, profile_url)
-        if name and key not in seen:
+        if key not in seen:
             seen.add(key)
             records.append(ProviderRecord(
-                source_site='zocdoc',
-                source_url=base_url,
-                listing_page_url=base_url,
-                name=name,
-                entity_type='doctor',
-                specialty=specialty,
-                address=address,
-                rating=rating_match.group(1) if rating_match else '',
-                review_count=reviews_match.group(1) if reviews_match else '',
-                next_available=next_available,
-                insurance=insurance,
-                profile_url=profile_url,
-                booking_url=booking_url,
-                raw_json={'text': text_blob[:2500]}
+                source_site='zocdoc', source_url=base_url, listing_page_url=base_url,
+                name=name, entity_type='doctor', specialty=str(specialty),
+                address=address, city=city, state=state, zip_code=zip_code,
+                rating=rating, review_count=review_count,
+                next_available=str(next_avail), insurance=insurance,
+                profile_url=profile_url, raw_json=inner,
             ))
 
     return records, find_next_links(base_url, soup)
