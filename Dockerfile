@@ -13,3 +13,5 @@ COPY . .
 
 ENV PORT=10000
 EXPOSE 10000
+
+CMD ["/bin/sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-10000} app:app"]
