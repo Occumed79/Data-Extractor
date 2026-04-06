@@ -11,44 +11,9 @@ services:
         fromDatabase:
           name: provider-data-portal-db
           property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: provider-data-portal-redis
-          property: connectionString
-      - key: RQ_QUEUE_NAME
-        value: provider-crawls
       - key: FLASK_SECRET_KEY
         generateValue: true
     startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 2 --threads 4 app:app
-
-  - type: worker
-    name: provider-data-portal-worker
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    plan: starter
-    autoDeploy: true
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: provider-data-portal-db
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: provider-data-portal-redis
-          property: connectionString
-      - key: RQ_QUEUE_NAME
-        value: provider-crawls
-      - key: FLASK_SECRET_KEY
-        sync: false
-    startCommand: python worker.py
-
-  - type: keyvalue
-    name: provider-data-portal-redis
-    plan: starter
-    maxmemoryPolicy: noeviction
-    ipAllowList: []
 
 databases:
   - name: provider-data-portal-db

@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, asdict
@@ -19,8 +20,6 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-
-from queue_config import get_queue
 
 try:
     from playwright.sync_api import sync_playwright
@@ -72,11 +71,6 @@ def db_conn(begin: bool = False):
         yield conn
 
 
-try:
-    get_queue().connection.ping()
-    QUEUE_AVAILABLE = True
-except Exception:
-    QUEUE_AVAILABLE = False
 
 
 @dataclass
@@ -549,7 +543,7 @@ init_db()
 def index():
     with db_conn() as conn:
         jobs = conn.execute(text('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 10')).mappings().fetchall()
-    return render_template('index.html', jobs=jobs, playwright_available=PLAYWRIGHT_AVAILABLE, queue_available=QUEUE_AVAILABLE)
+    return render_template('index.html', jobs=jobs, playwright_available=PLAYWRIGHT_AVAILABLE)
 
 
 @app.route('/start', methods=['POST'])
@@ -571,16 +565,7 @@ def start_job():
     save_job(job_id, site_type, urls, detail_mode, max_pages)
 
     from tasks import run_scrape_job
-
-    if QUEUE_AVAILABLE:
-        queue = get_queue()
-        queue.enqueue(run_scrape_job, job_id, job_timeout=60 * 60)
-    else:
-        try:
-            run_scrape_job(job_id)
-        except Exception as exc:
-            update_job(job_id, status='failed', error_text=str(exc)[:4000])
-            flash(f'Scrape failed: {str(exc)[:200]}')
+    threading.Thread(target=run_scrape_job, args=(job_id,), daemon=True).start()
 
     return redirect(url_for('job_detail', job_id=job_id))
 
@@ -703,6 +688,7 @@ def export_pdf(job_id):
 @app.route('/healthz', methods=['GET'])
 def healthz():
     return jsonify({'status': 'ok'})
+
 
 
 if __name__ == '__main__':

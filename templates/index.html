@@ -17,9 +17,6 @@
       <div class="status-chip {{ 'ok' if playwright_available else 'warn' }}">
         {{ 'Playwright ready' if playwright_available else 'Playwright not installed yet' }}
       </div>
-      <div class="status-chip {{ 'ok' if queue_available else 'warn' }}">
-        {{ 'Redis + RQ connected' if queue_available else 'Redis + RQ not connected' }}
-      </div>
     </aside>
 
     <main class="content">
