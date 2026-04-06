@@ -136,7 +136,19 @@ class BrowserFetcher:
             except Exception:
                 pass
             return self.page.content()
-        resp = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=30)
+        resp = requests.get(url, headers={
+            'User-Agent': USER_AGENT,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0',
+        }, timeout=30)
         resp.raise_for_status()
         return resp.text
 
@@ -688,6 +700,48 @@ def export_pdf(job_id):
 @app.route('/healthz', methods=['GET'])
 def healthz():
     return jsonify({'status': 'ok'})
+
+
+@app.route('/api/debug-fetch', methods=['GET'])
+def debug_fetch():
+    """Fetch a URL and report what came back — helps diagnose 0-result jobs."""
+    url = request.args.get('url', '').strip()
+    if not url:
+        return jsonify({'error': 'pass ?url=https://...'}), 400
+    try:
+        with BrowserFetcher() as f:
+            html = f.get_html(url)
+        has_next_data = bool(re.search(r'__NEXT_DATA__', html))
+        next_keys = []
+        if has_next_data:
+            m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', html, re.S)
+            if m:
+                try:
+                    nd = json.loads(m.group(1))
+                    next_keys = list(_walk_keys(nd, depth=3))
+                except Exception:
+                    pass
+        snippet = html[:400].replace('<', '&lt;')
+        return jsonify({
+            'url': url,
+            'status_length': len(html),
+            'has_next_data': has_next_data,
+            'next_data_keys_sample': next_keys[:40],
+            'html_snippet': snippet,
+        })
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
+
+
+def _walk_keys(obj, depth=3, _d=0):
+    if _d >= depth:
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _walk_keys(v, depth, _d + 1)
+    elif isinstance(obj, list) and obj:
+        yield from _walk_keys(obj[0], depth, _d + 1)
 
 
 
