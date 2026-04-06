@@ -34,6 +34,11 @@ USER_AGENT = (
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
     'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
 )
+FIRECRAWL_API_KEY  = os.getenv('FIRECRAWL_API_KEY', '')
+GROQ_API_KEY       = os.getenv('GROQ_API_KEY', '')
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')
+SERPER_API_KEY     = os.getenv('SERPER_API_KEY', '')
+TAVILY_API_KEY     = os.getenv('TAVILY_API_KEY', '')
 
 
 def normalize_database_url(url: str) -> str:
@@ -99,58 +104,169 @@ class ProviderRecord:
     raw_json: dict | None = None
 
 
-class BrowserFetcher:
-    def __init__(self):
-        self.play = None
-        self.browser = None
-        self.context = None
-        self.page = None
-
-    def __enter__(self):
-        if not PLAYWRIGHT_AVAILABLE:
-            return self
-        self.play = sync_playwright().start()
-        self.browser = self.play.chromium.launch(headless=True)
-        self.context = self.browser.new_context(user_agent=USER_AGENT)
-        self.page = self.context.new_page()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
+def fetch_page(url: str) -> tuple[str, str]:
+    """Fetch a page. Returns (html, markdown). Firecrawl when configured,
+    otherwise plain requests (markdown will be empty string)."""
+    if FIRECRAWL_API_KEY:
         try:
-            if self.context:
-                self.context.close()
-            if self.browser:
-                self.browser.close()
-            if self.play:
-                self.play.stop()
+            r = requests.post(
+                'https://api.firecrawl.dev/v1/scrape',
+                headers={
+                    'Authorization': f'Bearer {FIRECRAWL_API_KEY}',
+                    'Content-Type': 'application/json',
+                },
+                json={'url': url, 'formats': ['html', 'markdown'], 'waitFor': 2000},
+                timeout=60,
+            )
+            r.raise_for_status()
+            d = (r.json().get('data') or r.json())
+            html = d.get('html', '')
+            md   = d.get('markdown', '')
+            if html or md:
+                return html, md
         except Exception:
             pass
 
-    def get_html(self, url: str, wait_ms: int = 1500) -> str:
-        if PLAYWRIGHT_AVAILABLE and self.page:
-            self.page.goto(url, wait_until='domcontentloaded', timeout=45000)
-            self.page.wait_for_timeout(wait_ms)
-            try:
-                self.page.mouse.wheel(0, 2500)
-                self.page.wait_for_timeout(500)
-            except Exception:
-                pass
-            return self.page.content()
-        resp = requests.get(url, headers={
-            'User-Agent': USER_AGENT,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Cache-Control': 'max-age=0',
-        }, timeout=30)
-        resp.raise_for_status()
-        return resp.text
+    resp = requests.get(url, headers={
+        'User-Agent': USER_AGENT,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'DNT': '1',
+        'Cache-Control': 'max-age=0',
+    }, timeout=30)
+    resp.raise_for_status()
+    return resp.text, ''
+
+
+# ── LLM extraction ────────────────────────────────────────────────────────────
+
+_PROVIDER_SCHEMA = {
+    "type": "array",
+    "description": "Every healthcare provider, doctor, or hospital listed on this page",
+    "items": {
+        "type": "object",
+        "properties": {
+            "name":           {"type": "string"},
+            "specialty":      {"type": "string"},
+            "entity_type":    {"type": "string", "description": "doctor | hospital | provider"},
+            "address":        {"type": "string"},
+            "city":           {"type": "string"},
+            "state":          {"type": "string"},
+            "zip_code":       {"type": "string"},
+            "price":          {"type": "string"},
+            "rating":         {"type": "string"},
+            "review_count":   {"type": "string"},
+            "next_available": {"type": "string"},
+            "insurance":      {"type": "string"},
+            "profile_url":    {"type": "string"},
+            "phone":          {"type": "string"},
+        },
+        "required": ["name"],
+    },
+}
+
+_EXTRACT_PROMPT = (
+    "Extract every healthcare provider, doctor, or hospital listing from the page below. "
+    "Return ONLY a JSON array matching the schema. No markdown, no explanation.\n\n"
+    "Schema: {schema}\n\nPage URL: {url}\n\nContent:\n{content}"
+)
+
+
+def _call_llm(prompt: str) -> str:
+    """Try Groq first, fall back to OpenRouter."""
+    if GROQ_API_KEY:
+        try:
+            r = requests.post(
+                'https://api.groq.com/openai/v1/chat/completions',
+                headers={'Authorization': f'Bearer {GROQ_API_KEY}', 'Content-Type': 'application/json'},
+                json={
+                    'model': 'llama-3.1-8b-instant',
+                    'messages': [{'role': 'user', 'content': prompt}],
+                    'temperature': 0,
+                    'max_tokens': 4096,
+                },
+                timeout=45,
+            )
+            r.raise_for_status()
+            return r.json()['choices'][0]['message']['content']
+        except Exception:
+            pass
+
+    if OPENROUTER_API_KEY:
+        try:
+            r = requests.post(
+                'https://openrouter.ai/api/v1/chat/completions',
+                headers={'Authorization': f'Bearer {OPENROUTER_API_KEY}', 'Content-Type': 'application/json'},
+                json={
+                    'model': 'meta-llama/llama-3.1-8b-instruct:free',
+                    'messages': [{'role': 'user', 'content': prompt}],
+                    'temperature': 0,
+                    'max_tokens': 4096,
+                },
+                timeout=45,
+            )
+            r.raise_for_status()
+            return r.json()['choices'][0]['message']['content']
+        except Exception:
+            pass
+
+    return ''
+
+
+def extract_providers_llm(url: str, content: str) -> list[dict]:
+    """Ask an LLM to extract provider records from page content."""
+    if not (GROQ_API_KEY or OPENROUTER_API_KEY):
+        return []
+    prompt = _EXTRACT_PROMPT.format(
+        schema=json.dumps(_PROVIDER_SCHEMA, indent=2),
+        url=url,
+        content=content[:10000],
+    )
+    raw = _call_llm(prompt)
+    if not raw:
+        return []
+    m = re.search(r'\[.*\]', raw, re.S)
+    if not m:
+        return []
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return []
+
+
+# ── Web search ────────────────────────────────────────────────────────────────
+
+def search_provider_urls(query: str, num: int = 10) -> list[str]:
+    """Search Google (Serper) or Tavily for provider listing URLs."""
+    if SERPER_API_KEY:
+        try:
+            r = requests.post(
+                'https://google.serper.dev/search',
+                headers={'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json'},
+                json={'q': query, 'num': num},
+                timeout=15,
+            )
+            r.raise_for_status()
+            results = r.json().get('organic', [])
+            return [item['link'] for item in results if 'link' in item]
+        except Exception:
+            pass
+
+    if TAVILY_API_KEY:
+        try:
+            r = requests.post(
+                'https://api.tavily.com/search',
+                headers={'Content-Type': 'application/json'},
+                json={'api_key': TAVILY_API_KEY, 'query': query, 'max_results': num},
+                timeout=15,
+            )
+            r.raise_for_status()
+            results = r.json().get('results', [])
+            return [item['url'] for item in results if 'url' in item]
+        except Exception:
+            pass
+
+    return []
 
 
 def normalize_space(text: str) -> str:
@@ -213,7 +329,55 @@ def _walk(obj, keys):
             yield from _walk(item, keys)
 
 
-def mdsave_parse_cards(base_url: str, html: str) -> tuple[list[ProviderRecord], list[str]]:
+def _llm_dicts_to_records(items: list[dict], source_site: str, base_url: str) -> list[ProviderRecord]:
+    records = []
+    seen = set()
+    for p in items:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get('name') or '').strip()
+        if not name:
+            continue
+        profile_url = str(p.get('profile_url') or '')
+        if profile_url and not profile_url.startswith('http'):
+            profile_url = urljoin(base_url, profile_url)
+        price = str(p.get('price') or '')
+        if price and not price.startswith('$') and re.search(r'\d', price):
+            price = '$' + price
+        key = (name, str(p.get('address', '')), profile_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        specialty = p.get('specialty') or ''
+        if isinstance(specialty, list):
+            specialty = ', '.join(str(s) for s in specialty)
+        insurance = p.get('insurance') or ''
+        if isinstance(insurance, list):
+            insurance = ', '.join(str(i) for i in insurance[:3])
+        records.append(ProviderRecord(
+            source_site=source_site,
+            source_url=base_url,
+            listing_page_url=base_url,
+            name=name,
+            entity_type=str(p.get('entity_type') or 'provider'),
+            specialty=str(specialty),
+            address=str(p.get('address') or ''),
+            city=str(p.get('city') or ''),
+            state=str(p.get('state') or ''),
+            zip_code=str(p.get('zip_code') or ''),
+            price=price,
+            rating=str(p.get('rating') or ''),
+            review_count=str(p.get('review_count') or ''),
+            next_available=str(p.get('next_available') or ''),
+            insurance=str(insurance),
+            profile_url=profile_url,
+            phone=str(p.get('phone') or ''),
+            raw_json=p,
+        ))
+    return records
+
+
+def mdsave_parse_cards(base_url: str, html: str, markdown: str = '') -> tuple[list[ProviderRecord], list[str]]:
     soup = BeautifulSoup(html, 'html.parser')
     records: list[ProviderRecord] = []
     seen = set()
@@ -266,10 +430,16 @@ def mdsave_parse_cards(base_url: str, html: str) -> tuple[list[ProviderRecord], 
                         raw_json={'anchor_text': text_val},
                     ))
 
+    # --- LLM fallback ---
+    if not records:
+        content = markdown or BeautifulSoup(html, 'html.parser').get_text(' ', strip=True)
+        llm_items = extract_providers_llm(base_url, content)
+        records = _llm_dicts_to_records(llm_items, 'mdsave', base_url)
+
     return records, find_next_links(base_url, soup)
 
 
-def zocdoc_parse_cards(base_url: str, html: str) -> tuple[list[ProviderRecord], list[str]]:
+def zocdoc_parse_cards(base_url: str, html: str, markdown: str = '') -> tuple[list[ProviderRecord], list[str]]:
     soup = BeautifulSoup(html, 'html.parser')
     records: list[ProviderRecord] = []
     seen = set()
@@ -321,6 +491,12 @@ def zocdoc_parse_cards(base_url: str, html: str) -> tuple[list[ProviderRecord], 
                 profile_url=profile_url, raw_json=inner,
             ))
 
+    # --- LLM fallback ---
+    if not records:
+        content = markdown or BeautifulSoup(html, 'html.parser').get_text(' ', strip=True)
+        llm_items = extract_providers_llm(base_url, content)
+        records = _llm_dicts_to_records(llm_items, 'zocdoc', base_url)
+
     return records, find_next_links(base_url, soup)
 
 
@@ -366,34 +542,33 @@ def crawl_site(seed_url: str, site_type: str, detail_mode: bool, max_pages: int)
     visited_pages: set[str] = set()
     queued = [seed_url]
 
-    with BrowserFetcher() as fetcher:
-        while queued and len(visited_pages) < max_pages:
-            current = queued.pop(0)
-            if current in visited_pages:
+    while queued and len(visited_pages) < max_pages:
+        current = queued.pop(0)
+        if current in visited_pages:
+            continue
+        visited_pages.add(current)
+        try:
+            html, md = fetch_page(current)
+        except Exception:
+            continue
+        cards, next_links = parse_func(current, html, md)
+        results.extend(cards)
+        for candidate in enumerate_pages(current, next_links, max_pages, visited_pages):
+            if candidate not in queued:
+                queued.append(candidate)
+
+    if detail_mode:
+        for rec in results:
+            target = rec.profile_url or rec.booking_url
+            if not target:
                 continue
-            visited_pages.add(current)
             try:
-                html = fetcher.get_html(current)
+                html, _ = fetch_page(target)
+                detail = parse_detail_page(site_type, target, html)
+                rec.phone = rec.phone or detail.get('phone', '')
+                rec.notes = rec.notes or detail.get('notes', '')
             except Exception:
                 continue
-            cards, next_links = parse_func(current, html)
-            results.extend(cards)
-            for candidate in enumerate_pages(current, next_links, max_pages, visited_pages):
-                if candidate not in queued:
-                    queued.append(candidate)
-
-        if detail_mode:
-            for rec in results:
-                target = rec.profile_url or rec.booking_url
-                if not target:
-                    continue
-                try:
-                    html = fetcher.get_html(target, wait_ms=1000)
-                    detail = parse_detail_page(site_type, target, html)
-                    rec.phone = rec.phone or detail.get('phone', '')
-                    rec.notes = rec.notes or detail.get('notes', '')
-                except Exception:
-                    continue
 
     deduped = []
     seen = set()
@@ -533,7 +708,7 @@ init_db()
 def index():
     with db_conn() as conn:
         jobs = conn.execute(text('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 10')).mappings().fetchall()
-    return render_template('index.html', jobs=jobs, playwright_available=PLAYWRIGHT_AVAILABLE)
+    return render_template('index.html', jobs=jobs, firecrawl_available=bool(FIRECRAWL_API_KEY))
 
 
 @app.route('/start', methods=['POST'])
@@ -702,6 +877,18 @@ def healthz():
     return jsonify({'status': 'ok'})
 
 
+@app.route('/api/search-urls', methods=['GET'])
+def api_search_urls():
+    """Use Serper/Tavily to find provider listing URLs for a query."""
+    q = request.args.get('q', '').strip()
+    if not q:
+        return jsonify({'error': 'pass ?q=your+search+query'}), 400
+    if not (SERPER_API_KEY or TAVILY_API_KEY):
+        return jsonify({'error': 'No search API configured (SERPER_API_KEY or TAVILY_API_KEY)'}), 503
+    urls = search_provider_urls(q)
+    return jsonify({'query': q, 'urls': urls})
+
+
 @app.route('/api/debug-fetch', methods=['GET'])
 def debug_fetch():
     """Fetch a URL and report what came back — helps diagnose 0-result jobs."""
@@ -709,8 +896,7 @@ def debug_fetch():
     if not url:
         return jsonify({'error': 'pass ?url=https://...'}), 400
     try:
-        with BrowserFetcher() as f:
-            html = f.get_html(url)
+        html, md = fetch_page(url)
         has_next_data = bool(re.search(r'__NEXT_DATA__', html))
         next_keys = []
         if has_next_data:
