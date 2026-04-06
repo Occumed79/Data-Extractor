@@ -105,8 +105,13 @@ class ProviderRecord:
 
 
 def fetch_page(url: str) -> tuple[str, str]:
-    """Fetch a page. Returns (html, markdown). Firecrawl when configured,
-    otherwise plain requests (markdown will be empty string)."""
+    """Fetch a page. Returns (html, markdown).
+    Firecrawl REQUIRED for MDsave/Zocdoc — both block plain requests with 403.
+    Falls back to requests only as last resort."""
+    if not FIRECRAWL_API_KEY:
+        import logging
+        logging.warning('FIRECRAWL_API_KEY not set — requests will be blocked by MDsave/Zocdoc (403)')
+
     if FIRECRAWL_API_KEY:
         try:
             r = requests.post(
@@ -115,8 +120,15 @@ def fetch_page(url: str) -> tuple[str, str]:
                     'Authorization': f'Bearer {FIRECRAWL_API_KEY}',
                     'Content-Type': 'application/json',
                 },
-                json={'url': url, 'formats': ['html', 'markdown'], 'waitFor': 2000},
-                timeout=60,
+                json={
+                    'url': url,
+                    'formats': ['html', 'markdown'],
+                    'waitFor': 3000,
+                    'mobile': False,
+                    'skipTlsVerification': False,
+                    'timeout': 55000,
+                },
+                timeout=90,
             )
             r.raise_for_status()
             d = (r.json().get('data') or r.json())
@@ -124,8 +136,10 @@ def fetch_page(url: str) -> tuple[str, str]:
             md   = d.get('markdown', '')
             if html or md:
                 return html, md
-        except Exception:
-            pass
+            # Firecrawl returned empty — surface the error
+            raise ValueError(f'Firecrawl returned empty content for {url}')
+        except Exception as exc:
+            raise RuntimeError(f'Firecrawl fetch failed: {exc}') from exc
 
     resp = requests.get(url, headers={
         'User-Agent': USER_AGENT,
@@ -549,7 +563,10 @@ def crawl_site(seed_url: str, site_type: str, detail_mode: bool, max_pages: int)
         visited_pages.add(current)
         try:
             html, md = fetch_page(current)
-        except Exception:
+        except Exception as exc:
+            if len(visited_pages) == 1:
+                # First page failed — raise so the job shows a real error message
+                raise
             continue
         cards, next_links = parse_func(current, html, md)
         results.extend(cards)
