@@ -16,16 +16,39 @@
     </nav>
   </aside>
   <main class="content">
-    <section class="hero glass"><h1>Run history</h1></section>
+    <section class="hero glass">
+      <h1>Run history</h1>
+    </section>
+
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}<div class="glass flash">{{ messages[0] }}</div>{% endif %}
+    {% endwith %}
+
     <section class="glass panel">
+      <div class="toolbar">
+        <form method="post" action="{{ url_for('clear_stuck_jobs') }}" style="margin:0">
+          <button class="btn-secondary" type="submit"
+            onclick="return confirm('Delete all queued and failed jobs?')">
+            Clear stuck jobs
+          </button>
+        </form>
+      </div>
       <div class="job-list">
         {% for job in jobs %}
-        <a class="job-card" href="{{ url_for('job_detail', job_id=job['id']) }}">
-          <div class="job-top"><strong>{{ job['id'] }}</strong><span class="pill {{ job['status'] }}">{{ job['status'] }}</span></div>
-          <div class="muted">{{ job['site_type'] }} · {{ job['result_count'] }} results · max pages {{ job['max_pages'] }}</div>
-          <div class="tiny">Created {{ job['created_at'] }}</div>
-          {% if job['error_text'] %}<div class="error-text">{{ job['error_text'] }}</div>{% endif %}
-        </a>
+        <div class="job-card-wrap">
+          <a class="job-card" href="{{ url_for('job_detail', job_id=job['id']) }}">
+            <div class="job-top"><strong>{{ job['id'] }}</strong><span class="pill {{ job['status'] }}">{{ job['status'] }}</span></div>
+            <div class="muted">{{ job['site_type'] }} · {{ job['result_count'] }} results · max pages {{ job['max_pages'] }}</div>
+            <div class="tiny">Created {{ job['created_at'] }}</div>
+            {% if job['error_text'] %}<div class="error-text">{{ job['error_text'] }}</div>{% endif %}
+          </a>
+          <form method="post" action="{{ url_for('delete_job', job_id=job['id']) }}" style="margin:0">
+            <button class="btn-delete" type="submit" title="Delete job"
+              onclick="return confirm('Delete this job and all its results?')">&#x2715;</button>
+          </form>
+        </div>
+        {% else %}
+        <div class="empty-state">No jobs yet.</div>
         {% endfor %}
       </div>
     </section>

@@ -571,6 +571,28 @@ def api_job(job_id):
     return jsonify(dict(job))
 
 
+@app.route('/job/<job_id>/delete', methods=['POST'])
+def delete_job(job_id):
+    with db_conn(begin=True) as conn:
+        conn.execute(text('DELETE FROM providers WHERE job_id = :job_id'), {'job_id': job_id})
+        conn.execute(text('DELETE FROM jobs WHERE id = :job_id'), {'job_id': job_id})
+    return redirect(url_for('history'))
+
+
+@app.route('/jobs/clear-stuck', methods=['POST'])
+def clear_stuck_jobs():
+    with db_conn(begin=True) as conn:
+        stuck = conn.execute(
+            text("SELECT id FROM jobs WHERE status IN ('queued', 'failed')")
+        ).fetchall()
+        ids = [r[0] for r in stuck]
+        for jid in ids:
+            conn.execute(text('DELETE FROM providers WHERE job_id = :jid'), {'jid': jid})
+            conn.execute(text('DELETE FROM jobs WHERE id = :jid'), {'jid': jid})
+    flash(f'Cleared {len(ids)} stuck job(s).')
+    return redirect(url_for('history'))
+
+
 EXPORT_FIELDS = [
     'id', 'source_site', 'source_url', 'listing_page_url', 'name', 'entity_type', 'specialty', 'hospital',
     'address', 'city', 'state', 'zip_code', 'price', 'rating', 'review_count', 'next_available',
