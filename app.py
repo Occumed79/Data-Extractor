@@ -34,6 +34,7 @@ USER_AGENT = (
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
     'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
 )
+FIRECRAWL_API_KEY = os.getenv('FIRECRAWL_API_KEY', '')
 
 
 def normalize_database_url(url: str) -> str:
@@ -99,58 +100,37 @@ class ProviderRecord:
     raw_json: dict | None = None
 
 
-class BrowserFetcher:
-    def __init__(self):
-        self.play = None
-        self.browser = None
-        self.context = None
-        self.page = None
-
-    def __enter__(self):
-        if not PLAYWRIGHT_AVAILABLE:
-            return self
-        self.play = sync_playwright().start()
-        self.browser = self.play.chromium.launch(headless=True)
-        self.context = self.browser.new_context(user_agent=USER_AGENT)
-        self.page = self.context.new_page()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
+def fetch_page(url: str) -> str:
+    """Fetch a page's rendered HTML. Uses Firecrawl when configured (handles
+    JS rendering and bot protection), falls back to plain requests."""
+    if FIRECRAWL_API_KEY:
         try:
-            if self.context:
-                self.context.close()
-            if self.browser:
-                self.browser.close()
-            if self.play:
-                self.play.stop()
+            r = requests.post(
+                'https://api.firecrawl.dev/v1/scrape',
+                headers={
+                    'Authorization': f'Bearer {FIRECRAWL_API_KEY}',
+                    'Content-Type': 'application/json',
+                },
+                json={'url': url, 'formats': ['html'], 'waitFor': 2000},
+                timeout=60,
+            )
+            r.raise_for_status()
+            data = r.json()
+            html = (data.get('data') or {}).get('html') or data.get('html') or ''
+            if html:
+                return html
         except Exception:
-            pass
+            pass  # fall through to requests
 
-    def get_html(self, url: str, wait_ms: int = 1500) -> str:
-        if PLAYWRIGHT_AVAILABLE and self.page:
-            self.page.goto(url, wait_until='domcontentloaded', timeout=45000)
-            self.page.wait_for_timeout(wait_ms)
-            try:
-                self.page.mouse.wheel(0, 2500)
-                self.page.wait_for_timeout(500)
-            except Exception:
-                pass
-            return self.page.content()
-        resp = requests.get(url, headers={
-            'User-Agent': USER_AGENT,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Cache-Control': 'max-age=0',
-        }, timeout=30)
-        resp.raise_for_status()
-        return resp.text
+    resp = requests.get(url, headers={
+        'User-Agent': USER_AGENT,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'DNT': '1',
+        'Cache-Control': 'max-age=0',
+    }, timeout=30)
+    resp.raise_for_status()
+    return resp.text
 
 
 def normalize_space(text: str) -> str:
@@ -366,34 +346,33 @@ def crawl_site(seed_url: str, site_type: str, detail_mode: bool, max_pages: int)
     visited_pages: set[str] = set()
     queued = [seed_url]
 
-    with BrowserFetcher() as fetcher:
-        while queued and len(visited_pages) < max_pages:
-            current = queued.pop(0)
-            if current in visited_pages:
+    while queued and len(visited_pages) < max_pages:
+        current = queued.pop(0)
+        if current in visited_pages:
+            continue
+        visited_pages.add(current)
+        try:
+            html = fetch_page(current)
+        except Exception:
+            continue
+        cards, next_links = parse_func(current, html)
+        results.extend(cards)
+        for candidate in enumerate_pages(current, next_links, max_pages, visited_pages):
+            if candidate not in queued:
+                queued.append(candidate)
+
+    if detail_mode:
+        for rec in results:
+            target = rec.profile_url or rec.booking_url
+            if not target:
                 continue
-            visited_pages.add(current)
             try:
-                html = fetcher.get_html(current)
+                html = fetch_page(target)
+                detail = parse_detail_page(site_type, target, html)
+                rec.phone = rec.phone or detail.get('phone', '')
+                rec.notes = rec.notes or detail.get('notes', '')
             except Exception:
                 continue
-            cards, next_links = parse_func(current, html)
-            results.extend(cards)
-            for candidate in enumerate_pages(current, next_links, max_pages, visited_pages):
-                if candidate not in queued:
-                    queued.append(candidate)
-
-        if detail_mode:
-            for rec in results:
-                target = rec.profile_url or rec.booking_url
-                if not target:
-                    continue
-                try:
-                    html = fetcher.get_html(target, wait_ms=1000)
-                    detail = parse_detail_page(site_type, target, html)
-                    rec.phone = rec.phone or detail.get('phone', '')
-                    rec.notes = rec.notes or detail.get('notes', '')
-                except Exception:
-                    continue
 
     deduped = []
     seen = set()
@@ -533,7 +512,7 @@ init_db()
 def index():
     with db_conn() as conn:
         jobs = conn.execute(text('SELECT * FROM jobs ORDER BY created_at DESC LIMIT 10')).mappings().fetchall()
-    return render_template('index.html', jobs=jobs, playwright_available=PLAYWRIGHT_AVAILABLE)
+    return render_template('index.html', jobs=jobs, firecrawl_available=bool(FIRECRAWL_API_KEY))
 
 
 @app.route('/start', methods=['POST'])
@@ -709,8 +688,7 @@ def debug_fetch():
     if not url:
         return jsonify({'error': 'pass ?url=https://...'}), 400
     try:
-        with BrowserFetcher() as f:
-            html = f.get_html(url)
+        html = fetch_page(url)
         has_next_data = bool(re.search(r'__NEXT_DATA__', html))
         next_keys = []
         if has_next_data:

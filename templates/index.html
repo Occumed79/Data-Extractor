@@ -14,8 +14,8 @@
         <a class="nav-link active" href="{{ url_for('index') }}">New Run</a>
         <a class="nav-link" href="{{ url_for('history') }}">History</a>
       </nav>
-      <div class="status-chip {{ 'ok' if playwright_available else 'warn' }}">
-        {{ 'Playwright ready' if playwright_available else 'Playwright not installed yet' }}
+      <div class="status-chip {{ 'ok' if firecrawl_available else 'warn' }}">
+        {{ 'Firecrawl connected' if firecrawl_available else 'Firecrawl not configured' }}
       </div>
     </aside>
 
