@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright/python:v1.51.0-jammy
+FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
